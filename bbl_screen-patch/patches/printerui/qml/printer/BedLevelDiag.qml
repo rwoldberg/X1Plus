@@ -183,11 +183,15 @@ Item {
                 for (var x in mesh[y]) {
                     var v = mesh[y][x];
                     if (v > 0)
-	                var rangec = Math.floor(255 - ( ( v / maxh ) * 255 ));
+                    {
+                        var rangec = Math.floor(255 - ( ( v / maxh ) * 255 ));
                         ctx.fillStyle = 'rgba(255, ' + rangec + ', ' + rangec + ', 1.0)';
+                    }
                     else
+                    {
                         var rangec =  Math.floor(255 - ( ( v / minh ) * 255 ));
-	                ctx.fillStyle = 'rgba(' + rangec + ', ' + rangec + ', 255, 1.0)';
+                        ctx.fillStyle = 'rgba(' + rangec + ', ' + rangec + ', 255, 1.0)';
+                    }
                     ctx.beginPath();
                     ctx.arc(parseFloat(x), YBED - parseFloat(y), 8, 0, 2*Math.PI);
                     ctx.fill();
