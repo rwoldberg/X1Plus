@@ -182,11 +182,12 @@ Item {
             for (var y in mesh) {
                 for (var x in mesh[y]) {
                     var v = mesh[y][x];
-                    var rangec = Math.floor((1 - Math.abs(v) / range) * 255);
                     if (v > 0)
+	                var rangec = Math.floor(255 - ( ( v / maxh ) * 255 ));
                         ctx.fillStyle = 'rgba(255, ' + rangec + ', ' + rangec + ', 1.0)';
                     else
-                        ctx.fillStyle = 'rgba(' + rangec + ', ' + rangec + ', 255, 1.0)';
+                        var rangec =  Math.floor(255 - ( ( v / minh ) * 255 ));
+	                ctx.fillStyle = 'rgba(' + rangec + ', ' + rangec + ', 255, 1.0)';
                     ctx.beginPath();
                     ctx.arc(parseFloat(x), YBED - parseFloat(y), 8, 0, 2*Math.PI);
                     ctx.fill();
@@ -196,11 +197,11 @@ Item {
             // draw a scale
             var gradient = ctx.createLinearGradient(0, 0, 0, YBED);
             var rangec = Math.floor((1 - maxh / range) * 255);
-            gradient.addColorStop(0, 'rgba(255, ' + rangec + ', ' + rangec + ', 1.0)');
+            gradient.addColorStop(0, 'rgba(255, 0, 0, 1.0)');
             var midpt = maxh / (maxh - minh + 0.001);
             gradient.addColorStop(midpt, 'rgba(255, 255, 255, 1.0)');
             rangec = Math.floor((1 - Math.abs(minh) / range) * 255);
-            gradient.addColorStop(1, 'rgba(' + rangec + ', ' + rangec + ', 255, 1.0)');
+            gradient.addColorStop(1, 'rgba(0, 0, 255, 1.0)');
 
             ctx.fillStyle = gradient;
             ctx.strokeStyle = 'white';
