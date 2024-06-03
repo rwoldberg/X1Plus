@@ -9,6 +9,10 @@
 .import "./x1plus/GcodeGenerator.js" as X1PlusGcodeGenerator
 .import "./x1plus/BedMeshCalibration.js" as X1PlusBedMeshCalibration
 .import "./x1plus/ShaperCalibration.js" as X1PlusShaperCalibration
+.import "./x1plus/DBus.js" as X1PlusDBus
+.import "./x1plus/Settings.js" as X1PlusSettings
+.import "./x1plus/TempGraph.js" as X1PlusTempGraph
+.import "./x1plus/OTA.js" as X1PlusOTA
 
 /* Back-end model logic for X1Plus's UI
  *
@@ -48,12 +52,24 @@ X1Plus.ShaperCalibration = X1PlusShaperCalibration;
 var ShaperCalibration = X1PlusShaperCalibration;
 X1Plus.GpioKeys = X1PlusGpioKeys;
 var GpioKeys  = X1PlusGpioKeys;
+X1Plus.DBus = X1PlusDBus;
+var DBus = X1PlusDBus;
+X1Plus.Settings = X1PlusSettings;
+var Settings = X1PlusSettings;
+X1Plus.TempGraph = X1PlusTempGraph;
+var TempGraph = X1PlusTempGraph;
+X1Plus.OTA = X1PlusOTA;
+var OTA = X1PlusOTA;
 
 Stats.X1Plus = X1Plus;
 DDS.X1Plus = X1Plus;
 BedMeshCalibration.X1Plus = X1Plus;
 ShaperCalibration.X1Plus = X1Plus;
 GpioKeys.X1Plus = X1Plus;
+DBus.X1Plus = X1Plus;
+Settings.X1Plus = X1Plus;
+TempGraph.X1Plus = X1Plus;
+OTA.X1Plus = X1Plus;
 
 var _DdsListener = JSDdsListener.DdsListener;
 var _X1PlusNative = JSX1PlusNative.X1PlusNative;
@@ -97,32 +113,17 @@ function atomicSaveJson(path, json) {
 }
 X1Plus.atomicSaveJson = atomicSaveJson;
 
-function sendGcode(gcode_line){
+function sendGcode(gcode_line,seq_id = 0){
+	
 	var payload = {
 		command: "gcode_line",
 		param: gcode_line,
-		sequence_id: "420"
+		sequence_id: seq_id
 	};
 	DDS.publish("device/request/print", payload);
 	console.log("[x1p] Gcode published:", JSON.stringify(payload));
 }
 X1Plus.sendGcode = sendGcode;
-
-function GcodeMacros(macro, ...arr){
-	switch (macro) { 
-        case GcodeGenerator.MACROS.VIBRATION_COMP: 
-            return GcodeGenerator.macros_vibrationCompensation(...arr);
-        case GcodeGenerator.MACROS.BED_LEVEL:
-            return GcodeGenerator.macros_ABL();
-        case GcodeGenerator.MACROS.NOZZLE_CAM_PREVIEW:
-            return GcodeGenerator.macros_nozzlecam();
-        case GcodeGenerator.MACROS.TRAMMING:
-            return GcodeGenerator.macros_tramming(...arr);
-        default:
-            throw new Error("Invalid macro type");
-    }
-}
-X1Plus.GcodeMacros = GcodeMacros;
 
 function formatTime(time) {
 	return new Date(time * 1000).toLocaleString('en-US', {
@@ -154,7 +155,23 @@ function awaken(_DeviceManager, _PrintManager, _PrintTask) {
 	X1Plus.PrintTask = PrintTask = _PrintTask;
 	X1Plus.printerConfigDir = printerConfigDir = `/mnt/sdcard/x1plus/printers/${X1Plus.DeviceManager.build.seriaNO}`;
 	_X1PlusNative.system("mkdir -p " + _X1PlusNative.getenv("EMULATION_WORKAROUNDS") + printerConfigDir);
+	Settings.awaken();
+	OTA.awaken();
 	BedMeshCalibration.awaken();
 	ShaperCalibration.awaken();
 	GpioKeys.awaken();
+	TempGraph.awaken();
+	console.log("X1Plus.js is awake");
 }
+
+X1Plus.DBus.registerMethod("ping", (param) => {
+	param["pong"] = "from QML";
+	return param;
+});
+X1Plus.DBus.onSignal("x1plus.screen", "log", (param) => console.log(param.text));
+X1Plus.DBus.registerMethod("TryRpc", (param) => {
+	console.log("trying an RPC to x1plus hello daemon");
+	var f = X1Plus.DBus.proxyFunction("x1plus.hello", "/x1plus/hello", "x1plus.hello", "PingPong");
+	param["resp"] = f("hello");
+	return param;
+});

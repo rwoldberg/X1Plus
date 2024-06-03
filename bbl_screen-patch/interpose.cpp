@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <QtCore/QObject>
 #include <QtCore/QSettings>
+#include <QtCore/QProcess>
+#include <QtCore/QVariantList>
 #include <QtQml/qqml.h>
 #include <QtQml/qjsengine.h>
 #include <QtQml/qjsvalue.h>
@@ -95,6 +97,7 @@ class X1PlusNativeClass : public QObject {
 public:
     X1PlusNativeClass(QObject *parent = 0) : QObject(parent) { }
     ~X1PlusNativeClass() {}
+    
     
     Q_INVOKABLE QList<QString> listX1ps(QString path) {
         QList<QString> l;
@@ -255,6 +258,26 @@ eject:
             unlink(tempFile.c_str());
         }
     }
+    
+    Q_INVOKABLE void vncEnable(int enabled) {
+#ifdef HAS_VNC
+        void x1plus_vnc_enable(bool enabled);
+        x1plus_vnc_enable(enabled);
+#endif
+    }
+    
+    Q_INVOKABLE void vncPassword(int hasPassword, QString password) {
+#ifdef HAS_VNC
+        void x1plus_vnc_set_password(const char *pw);
+        std::string password_str = password.toStdString();
+        if (hasPassword) {
+            x1plus_vnc_set_password(password_str.c_str() /* strdup()'ed internally */);
+        } else {
+            x1plus_vnc_set_password(NULL);
+        }
+#endif
+    }
+
     /*** Tricks to override the backlight.  See SWIZZLEs of fopen64, fclose, fileno, and write below. ***/
 private:
     static const int minBacklightValue = 50;
@@ -508,12 +531,191 @@ SWIZZLE(void, _ZN9QSettingsC1ERK7QStringNS_6FormatEP7QObject, QSettings *q, QStr
     next(q, fn, f, o);
 }
 
-SWIZZLE(void, _ZN5BDbus4NodeC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEN4DBus7BusTypeE, void *self, std::string &s, int BusType)
+/*** Interpose DBus on new firmwares. ***/
+
+#ifndef HAS_DBUS
+// make moc happy
+
+class DBusProxy : public QObject {
+    Q_OBJECT
+public:
+    DBusProxy(QObject *parent = 0) : QObject(parent) { }
+    ~DBusProxy() { }
+    
+    Q_INVOKABLE QString callMethod(QString interface, QString method, QString arg);
+};
+
+class DBusListener : public QObject {
+    Q_OBJECT
+
+public:
+    QObject *handler;
+    Q_PROPERTY(QObject *handler MEMBER handler);
+
+    DBusListener(QObject *parent = 0) : QObject(parent) { }
+    ~DBusListener() {}
+
+    Q_INVOKABLE void registerMethod(QString methodName) { }
+    Q_INVOKABLE void registerSignal(QString pathName, QString signalName) { }
+    Q_INVOKABLE QObject *createProxy(QString busname, QString object) { return NULL; }
+};
+#endif
+
+#ifdef HAS_DBUS
+
+namespace BDbus {
+    class Object;
+    
+    enum DispatcherForCalling {};
+    
+    struct MethodTable {
+        const char *name;
+        std::string (*fn)(void *ctx, std::string&);
+    };
+
+    struct SignalProxyTable {
+        const char *path;
+        const char *name;
+        void (*fn)(void *ctx, std::string&);
+    };
+    
+    class Error {
+        char buf[256]; /* I have no idea how big this thing actually is */
+    public:
+        Error();
+        ~Error();
+    };
+    
+    class Proxy {
+    public:
+        std::string callMethod(std::string const& /* interface? */, std::string const& /* method? */, std::string const& /* arg? */, BDbus::Error&);
+    };
+    
+    class Node {
+    public:
+        void registerObject(std::shared_ptr<BDbus::Object>, BDbus::DispatcherForCalling);
+        void destroyObject(std::string const&);
+        int createMethods(std::string const& objectName, std::string const& methodPrefix, BDbus::MethodTable const* methodTable, unsigned int methodCount, void* someParam, BDbus::DispatcherForCalling dispatcher);
+        int createSignalProxies(BDbus::SignalProxyTable*, unsigned int, void*);
+        std::shared_ptr<Proxy> createProxy(std::string const& /* bbl.service.storage */, std::string const& /* /bbl/service/storage */);
+    };
+};
+
+static std::string _handle_dbus_method_call(void *, std::string &);
+static void _handle_dbus_signal(void *, std::string &);
+
+class DBusProxy : public QObject {
+    Q_OBJECT
+public:
+    std::shared_ptr<BDbus::Proxy> proxy;
+    DBusProxy(QObject *parent = 0) : QObject(parent) { }
+    ~DBusProxy() { }
+    
+    Q_INVOKABLE QString callMethod(QString interface, QString method, QString arg) {
+        BDbus::Error e; /* ??? */
+        std::string rv = proxy->callMethod(interface.toStdString(), method.toStdString(), arg.toStdString(), e);
+        return QString::fromStdString(rv);
+    }
+};
+
+class DBusListener : public QObject {
+    Q_OBJECT
+
+public:
+    BDbus::Node *nobe;
+    BDbus::DispatcherForCalling dispatcher;
+
+    QObject *handler;
+    Q_PROPERTY(QObject *handler MEMBER handler);
+
+    DBusListener(QObject *parent = 0) : QObject(parent) { }
+    ~DBusListener() {}
+
+    Q_INVOKABLE void registerMethod(QString methodName) {
+        if (!nobe) {
+            printf("*** DBUS NODE IS NOT READY YET, THIS SHOULD NOT BE\n");
+            abort();
+        }
+        
+        BDbus::MethodTable *method = new BDbus::MethodTable;
+        method->name = strdup(methodName.toUtf8().constData());
+        method->fn = _handle_dbus_method_call;
+        nobe->createMethods("/bbl/service/screen", "bbl.screen.x1plus", method, 1, (void *)method->name, dispatcher);
+    }
+    
+    Q_INVOKABLE void registerSignal(QString pathName, QString signalName) {
+        if (!nobe) {
+            printf("*** DBUS NODE IS NOT READY YET, THIS SHOULD NOT BE\n");
+            abort();
+        }
+        
+        BDbus::SignalProxyTable *signal = new BDbus::SignalProxyTable;
+        signal->path = strdup(pathName.toUtf8().constData());
+        signal->name = strdup(signalName.toUtf8().constData());
+        signal->fn = _handle_dbus_signal;
+        nobe->createSignalProxies(signal, 1, signal);
+    }
+    
+    Q_INVOKABLE QObject *createProxy(QString busname, QString object) {
+        if (!nobe) {
+            printf("*** DBUS NODE IS NOT READY YET, THIS SHOULD NOT BE\n");
+            abort();
+        }
+        
+        DBusProxy *proxy = new DBusProxy(this);
+        proxy->proxy = nobe->createProxy(busname.toStdString(), object.toStdString());
+        return proxy;
+    }
+
+};
+static DBusListener dbusListener;
+
+SWIZZLE(void, _ZN5BDbus4NodeC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEN4DBus7BusTypeE, BDbus::Node *self, std::string &s, int BusType)
     if (getenv("EMULATION_WORKAROUNDS")) {
         BusType = 0; /* session bus, not system bus */
     }
     printf("_ZN5BDbus4NodeC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEN4DBus7BusTypeE %s %d\n", s.c_str(), BusType);
     next(self, s, BusType);
+    
+    dbusListener.nobe = self;
+}
+
+static std::string _handle_dbus_method_call(void *ctx, std::string &input) {
+    std::string s = "";
+    const char *name = (const char *)ctx;
+    if (dbusListener.handler) {
+        QVariant returnedValue;
+        printf("calling into dbus request for method %s\n", name);
+        QMetaObject::invokeMethod(dbusListener.handler, "dbusMethodCall",
+                                  Qt::BlockingQueuedConnection,
+                                  Q_RETURN_ARG(QVariant, returnedValue),
+                                  Q_ARG(QVariant, QString(name)),
+                                  Q_ARG(QVariant, QString::fromStdString(input))
+                                 );
+        s = returnedValue.toString().toStdString();
+    }
+    return s;
+}
+
+static void _handle_dbus_signal(void *ctx, std::string &input) {
+    BDbus::SignalProxyTable *signal = (BDbus::SignalProxyTable *)ctx;
+    if (dbusListener.handler) {
+        printf("calling into dbus request for signal %s.%s\n", signal->path, signal->name);
+        QMetaObject::invokeMethod(dbusListener.handler, "dbusSignal",
+                                  Qt::BlockingQueuedConnection,
+                                  Q_ARG(QVariant, QString(signal->path)),
+                                  Q_ARG(QVariant, QString(signal->name)),
+                                  Q_ARG(QVariant, QString::fromStdString(input))
+                                 );
+    }
+}
+
+
+SWIZZLE(int, _ZN5BDbus4Node13createMethodsERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES8_PKNS_11MethodTableEjPvNS_20DispatcherForCallingE, BDbus::Node *self, std::string const& objectName, std::string const& methodPrefix, BDbus::MethodTable const* methodTable, unsigned int methodCount, void* ctx, BDbus::DispatcherForCalling dispatcher)
+    printf("createMethods(%s, %s, ctx = %p, dispatcher = %p)\n", objectName.c_str(), methodPrefix.c_str(), ctx, dispatcher);
+    int rv = next(self, objectName, methodPrefix, methodTable, methodCount, ctx, dispatcher);
+    dbusListener.dispatcher = dispatcher;
+    return rv;
 }
 
 SWIZZLE(void, _ZN5BDbus4NodeC2ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEN4DBus7BusTypeE, void *self, std::string &s, int BusType)
@@ -523,6 +725,46 @@ SWIZZLE(void, _ZN5BDbus4NodeC2ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESa
     printf("_ZN5BDbus4NodeC2ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEN4DBus7BusTypeE %s %d\n", s.c_str(), BusType);
     next(self, s, BusType);
 }
+
+#endif
+
+/* QProcess class for running shell from QML a bit more reliably */
+class X1PlusProcess : public QProcess
+{
+    Q_OBJECT
+public:
+    explicit X1PlusProcess(QObject* parent = nullptr) : QProcess(parent) {
+        setProcessChannelMode(QProcess::MergedChannels);
+    }
+
+    Q_INVOKABLE void start(const QString& program, const QVariantList& arguments = QVariantList()) {
+        QStringList args;
+        for (const auto& arg : arguments) {
+            args << arg.toString();
+        }
+        QProcess::start(program, args);
+    }
+
+    Q_INVOKABLE QByteArray readAll() { return QProcess::readAll(); }
+    Q_INVOKABLE QByteArray readLine() { return QProcess::readLine(); }
+
+    /* Write to an active process */
+    Q_INVOKABLE qint64 write( const QString& data ){
+        return QProcess::write( qPrintable( data ) );
+    }
+    
+    Q_INVOKABLE void terminate() {
+        if (state() == QProcess::Running) {
+            QProcess::terminate();
+            if (!waitForFinished(3000)) {
+                QProcess::kill();
+            }
+        }
+    }  
+
+private:
+    Q_DISABLE_COPY(X1PlusProcess);
+};
 
 /*** Tricks to override the backlight.  See X1PlusNative.updateBacklight above. ***/
 
@@ -595,16 +837,6 @@ SWIZZLE(void *, _ZN7QObjectC2EPS_, void *p1, void *p2)
 
 static QMap<QByteArray, QString> *langmap;
 
-SWIZZLE(void *, _Z12bbl_get_propNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEES4_bb, void *a, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > *s1, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > *s2, bool b1, bool b2)
-    if (lang_init == 3 && *s1 == "device/model_int") {
-        printf("LANG INTERPOSE: found init for DeviceManager\n");
-        void **DeviceManager = (void **)last_qobject;
-        langmap = (QMap<QByteArray, QString> *) (DeviceManager + 9);
-        lang_init++;
-    }
-    return next(a, s1, s2, b1, b2);
-}
-
 SWIZZLE(void *, _ZN10QByteArrayC1EPKci, void *qba, const char *s, int n)
     if (s && strcmp(s, "en") == 0) {
         if (lang_init == 0) {
@@ -620,17 +852,18 @@ SWIZZLE(void *, _ZN10QByteArrayC1EPKci, void *qba, const char *s, int n)
                 lang_init = -1;
             }
         } else if (lang_init == 3) {
-            printf("LANG INTERPOSE: saw en for round 1 language default initializer\n");
+            printf("LANG INTERPOSE: saw en for round 1 language default initializer, qByteArray at %p, lr = %p\n", qba, __builtin_return_address(0));
+            langmap = (QMap <QByteArray, QString>*)(((void **)qba) - 1);
             lang_init++;
         } else if (lang_init == 4) {
-            printf("LANG INTERPOSE: saw en for round 2 map initializer\n");
+            printf("LANG INTERPOSE: saw en for round 2 map initializer, lr = %p\n", __builtin_return_address(0));
             lang_init++;
             if (*(void **)langmap != &QMapDataBase::shared_null) {
                 printf("LANG INTERPOSE: this bbl_screen does NOT look like the memory mapping we expect... not injecting languages into this version of bbl_screen\n");
                 lang_init = -1;
             }
         } else {
-            printf("LANG INTERPOSE: saw en fly by again... but after lang init?\n");
+            printf("LANG INTERPOSE: saw en fly by again... but after lang init?, lr = %p\n", __builtin_return_address(0));
         }
     } else if (s && strcmp(s, "sv") == 0) {
         if (lang_init == 2 || lang_init == 5) {
@@ -640,7 +873,7 @@ SWIZZLE(void *, _ZN10QByteArrayC1EPKci, void *qba, const char *s, int n)
             qDebug() << *langmap;
             lang_init++;
         } else {
-            printf("LANG INTERPOSE: saw sv fly by again... but after lang init?\n");
+            printf("LANG INTERPOSE: saw sv fly by again... but after lang init?, lr = %p\n", __builtin_return_address(0));
         }
     }
 
@@ -668,7 +901,7 @@ SWIZZLE(void, _Z21qRegisterResourceDataiPKhS0_S0_, int version, unsigned char co
     next(version, tree, name, data);
 } 
 
-SWIZZLE(int, ioctl, int fd, unsigned long req, void *p)
+SWIZZLE(int, ioctl, int fd, unsigned long int req, void *p)
     if (req == SIOCGIWMODE) {
         struct iwreq *wrq = (struct iwreq *)p;
         wrq->u.mode = IW_MODE_INFRA;
@@ -708,6 +941,7 @@ extern "C" void __attribute__ ((constructor)) init() {
         needs_emulation_workarounds = 1;
     setenv("QML_XHR_ALLOW_FILE_READ", "1", 1); // Tell QML that it's ok to let us read files from inside XHR land.
     setenv("QML_XHR_ALLOW_FILE_WRITE", "1", 1); // Tell QML that it's ok to let us write files from inside XHR land.
+    qmlRegisterType<X1PlusProcess>("X1PlusProcess", 1, 0, "X1PlusProcess");
     qmlRegisterSingletonType("X1PlusNative", 1, 0, "X1PlusNative", [](QQmlEngine *engine, QJSEngine *scriptEngine) -> QJSValue {
         Q_UNUSED(engine)
 
@@ -719,9 +953,16 @@ extern "C" void __attribute__ ((constructor)) init() {
         Q_UNUSED(engine)
 
         QJSValue obj = scriptEngine->newQObject(&listener);
-        
         scriptEngine->globalObject().setProperty("_DdsListener", obj);
-        
         return obj;
     });
+#ifdef HAS_DBUS
+    qmlRegisterSingletonType("DBusListener", 1, 0, "DBusListener", [](QQmlEngine *engine, QJSEngine *scriptEngine) -> QJSValue {
+        Q_UNUSED(engine)
+
+        QJSValue obj = scriptEngine->newQObject(&dbusListener);
+        scriptEngine->globalObject().setProperty("_DBusListener", obj);
+        return obj;
+    });
+#endif
 }
