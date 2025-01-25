@@ -1,6 +1,5 @@
 import asyncio
 import logging, logging.handlers
-import os
 import setproctitle
 
 from . import X1PlusDaemon, logger
@@ -19,8 +18,6 @@ ch.setLevel(logging.DEBUG)
 ch.setFormatter(logging.Formatter("[%(asctime)s] %(name)s: %(levelname)s: %(message)s"))
 logger.addHandler(ch)
 
-PID_FILE = '/var/run/x1plusd.pid'
-
 
 def exceptions(loop, ctx):
     logger.error(f"exception in coroutine: {ctx['message']} {ctx.get('exception', '')}")
@@ -30,41 +27,39 @@ def exceptions(loop, ctx):
     except:
         pass
 
+# TODO: check if we are already running
+loop = asyncio.new_event_loop()
+loop.set_exception_handler(exceptions)
 
 async def start():
-    x1plusd = await X1PlusDaemon.create()
-    await x1plusd.start()
-
-
-def is_already_running():
     try:
-        with open(PID_FILE, 'r') as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 0)  # Check if the process is still running
-        return True
-    except (IOError, ValueError, OSError):
-        return False
+        x1plusd = await X1PlusDaemon.create()
+        for key in x1plusd.watched_keys:
+            x1plusd.settings.on(key, lambda: stop())
 
+        await x1plusd.start() 
+    except Exception as e:
+        logger.error(f"Error starting x1plusd. {e.__class__.__name__}: {e}")
+        if loop:
+            await stop_loop()
 
-# catchall exception
+loop.create_task(start())
+
+def stop():
+    asyncio.create_task(stop_loop())
+
+async def stop_loop():
+    logger.info("Stopping x1plusd after module config change")
+    current_task = asyncio.current_task(loop=loop)
+    tasks = [task for task in asyncio.all_tasks(loop=loop) if task != current_task]
+    for task in tasks:
+        task.cancel()
+    await asyncio.sleep(5)
+    quit()
+
 try:
-    # Check if we are already running
-    if is_already_running():
-        logger.error("x1plusd is already running. Exiting.")
-        exit(1)
-
-    # Create the PID file
-    with open(PID_FILE, 'w') as f:
-        f.write(str(os.getpid()))
-
-    loop = asyncio.new_event_loop()
-    loop.set_exception_handler(exceptions)
-    loop.create_task(start())
     loop.run_forever()
-except Exception as e:
-    logger.error(f"Exception occurred: {e}")
 finally:
     logger.error("x1plusd event loop has terminated!")
     loop.run_until_complete(loop.shutdown_asyncgens())
-    os.unlink(PID_FILE)
     loop.close()
